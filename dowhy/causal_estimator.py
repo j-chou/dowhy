@@ -10,7 +10,11 @@ class CausalEstimator:
     """
 
     def __init__(self, data, identified_estimand, treatment, outcome,
-                 test_significance, params=None):
+                 control_value=0, treatment_value=1,
+                 test_significance=False, evaluate_effect_strength=False,
+                 confidence_intervals = False,
+                 target_units=None, effect_modifiers=None,
+                 params=None):
         """Initializes an estimator with data and names of relevant variables.
 
         More description.
@@ -20,6 +24,10 @@ class CausalEstimator:
             representing the target identified estimand to estimate.
         :param treatment: name of the treatment variable
         :param outcome: name of the outcome variable
+        :param test_significance: whether to test significance
+        :param evaluate_effect_strength: whether to evaluate the strength of effect
+        :param target_units: ATE, ATT or another subset of units (preview feature)
+        :param effect_modifiers: variables on which to compute separate effects, or return a heterogeneous effect function (not implemented)
         :param params: (optional) additional method parameters
         :returns: an instance of the estimator class.
 
@@ -27,15 +35,37 @@ class CausalEstimator:
         self._data = data
         self._target_estimand = identified_estimand
         # Currently estimation methods only support univariate treatment and outcome
-        self._treatment_name = treatment[0]
-        self._outcome_name = outcome[0]
+        self._treatment_name = treatment
+        self._outcome_name = outcome[0] # assuming one-dimensional outcome
+        self._control_value = control_value
+        self._treatment_value = treatment_value
         self._significance_test = test_significance
+        self._effect_strength_eval = evaluate_effect_strength
+        self._target_units = target_units
+        self._effect_modifier_names = effect_modifiers
+        self._confidence_intervals = confidence_intervals
         self._estimate = None
+        self._effect_modifiers = None
+        self.method_params = params
         if params is not None:
             for key, value in params.items():
                 setattr(self, key, value)
 
         self.logger = logging.getLogger(__name__)
+
+        # Setting more values
+        if self._data is not None:
+            self._treatment = self._data[self._treatment_name]
+            self._outcome = self._data[self._outcome_name]
+
+        # Now saving the effect modifiers
+        if self._effect_modifier_names:
+            self._effect_modifiers = self._data[self._effect_modifier_names]
+            self.logger.debug("Effect modifiers: " +
+                          ",".join(self._effect_modifier_names))
+
+    def _estimate_effect(self):
+        raise NotImplementedError
 
     def estimate_effect(self):
         """TODO.
@@ -46,16 +76,25 @@ class CausalEstimator:
         :returns: point estimate of causal effect
 
         """
-        self._treatment = self._data[self._treatment_name]
-        self._outcome = self._data[self._outcome_name]
-        est = self._estimate_effect()
-        # self._estimate = est
 
+        est = self._estimate_effect()
+        self._estimate = est
 
         if self._significance_test:
             signif_dict = self.test_significance(est)
             est.add_significance_test_results(signif_dict)
+        if self._effect_strength_eval:
+            effect_strength_dict = self.evaluate_effect_strength(est)
+            est.add_effect_strength(effect_strength_dict)
+
         return est
+
+    def estimate_effect_naive(self):
+        #TODO Only works for binary treatment
+        df_withtreatment = self._data.loc[self._data[self._treatment_name] == 1]
+        df_notreatment = self._data.loc[self._data[self._treatment_name]== 0]
+        est = np.mean(df_withtreatment[self._outcome_name]) - np.mean(df_notreatment[self._outcome_name])
+        return CausalEstimate(est, None, None)
 
     def _do(self, x):
         raise NotImplementedError
@@ -69,11 +108,11 @@ class CausalEstimator:
         :returns:
 
         """
-        self._treatment = self._data[self._treatment_name]
-        self._outcome = self._data[self._outcome_name]
         est = self._do(x)
-
         return est
+
+    def construct_symbolic_estimator(self, estimand):
+        raise NotImplementedError
 
     def test_significance(self, estimate, num_simulations=1000):
         """Test statistical significance of obtained estimate.
@@ -112,9 +151,39 @@ class CausalEstimator:
         }
         return signif_dict
 
+    def evaluate_effect_strength(self, estimate):
+        fraction_effect_explained = self._evaluate_effect_strength(estimate, method="fraction-effect")
+        # Need to test r-squared before supporting
+        #effect_r_squared = self._evaluate_effect_strength(estimate, method="r-squared")
+        strength_dict = {
+                'fraction-effect': fraction_effect_explained
+         #       'r-squared': effect_r_squared
+                }
+        return strength_dict
+
+    def _evaluate_effect_strength(self, estimate, method="fraction-effect"):
+        supported_methods = ["fraction-effect"]
+        if method not in supported_methods:
+            raise NotImplementedError("This method is not supported for evaluating effect strength")
+        if method == "fraction-effect":
+            naive_obs_estimate = self.estimate_effect_naive()
+            print(estimate.value, naive_obs_estimate.value)
+            fraction_effect_explained = estimate.value/naive_obs_estimate.value
+            return fraction_effect_explained
+        #elif method == "r-squared":
+        #    outcome_mean = np.mean(self._outcome)
+        #    total_variance = np.sum(np.square(self._outcome - outcome_mean))
+            # Assuming a linear model with one variable: the treatment
+            # Currently only works for continuous y
+        #    causal_model = outcome_mean + estimate.value*self._treatment
+        #    squared_residual = np.sum(np.square(self._outcome - causal_model))
+        #    r_squared = 1 - (squared_residual/total_variance)
+        #    return r_squared
+        else:
+            return None
 
 class CausalEstimate:
-    """TODO.
+    """Class for the estimate object that every causal estimator returns
 
     """
 
@@ -123,10 +192,18 @@ class CausalEstimate:
         self.target_estimand = target_estimand
         self.realized_estimand_expr = realized_estimand_expr
         self.params = kwargs
+        if self.params is not None:
+            for key, value in self.params.items():
+                setattr(self, key, value)
+
         self.significance_test = None
+        self.effect_strength = None
 
     def add_significance_test_results(self, test_results):
         self.significance_test = test_results
+
+    def add_effect_strength(self, strength_dict):
+        self.effect_strength = strength_dict
 
     def add_params(self, **kwargs):
         self.params.update(kwargs)
@@ -143,6 +220,10 @@ class CausalEstimate:
                 s += "p-value: {0}\n".format(self.significance_test["p_value"])
             else:
                 s+= "p-value: <{0}\n".format(1/len(self.significance_test["sorted_null_estimates"]))
+        if self.effect_strength is not None:
+            s += "\n## Effect Strength\n"
+            s += "Change in outcome attributable to treatment: {}\n".format(self.effect_strength["fraction-effect"])
+            #s += "Variance in outcome explained by treatment: {}\n".format(self.effect_strength["r-squared"])
         return s
 
 

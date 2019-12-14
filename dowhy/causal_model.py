@@ -25,8 +25,11 @@ class CausalModel:
     """
 
     def __init__(self, data, treatment, outcome, graph=None,
-                 common_causes=None, instruments=None, estimand_type="ate",
+                 common_causes=None, instruments=None,
+                 effect_modifiers=None,
+                 estimand_type="ate",
                  proceed_when_unidentifiable=False,
+                 missing_nodes_as_confounders=False,
                  **kwargs):
         """Initialize data and create a causal graph instance.
 
@@ -45,6 +48,7 @@ class CausalModel:
         :param common_causes: names of common causes of treatment and _outcome
         :param instruments: names of instrumental variables for the effect of
         treatment on outcome
+        :param effect_modifiers: names of variables that can modify the treatment effect (useful for heterogeneous treatment effect estimation)
         :returns: an instance of CausalModel class
 
         """
@@ -53,6 +57,7 @@ class CausalModel:
         self._outcome = parse_state(outcome)
         self._estimand_type = estimand_type
         self._proceed_when_unidentifiable = proceed_when_unidentifiable
+        self._missing_nodes_as_confounders = missing_nodes_as_confounders
         if 'logging_level' in kwargs:
             logging.basicConfig(level=kwargs['logging_level'])
         else:
@@ -65,12 +70,14 @@ class CausalModel:
             self.logger.warning("Causal Graph not provided. DoWhy will construct a graph based on data inputs.")
             self._common_causes = parse_state(common_causes)
             self._instruments = parse_state(instruments)
+            self._effect_modifiers = parse_state(effect_modifiers)
             if common_causes is not None and instruments is not None:
                 self._graph = CausalGraph(
                     self._treatment,
                     self._outcome,
                     common_cause_names=self._common_causes,
                     instrument_names=self._instruments,
+                    effect_modifier_names = self._effect_modifiers,
                     observed_node_names=self._data.columns.tolist()
                 )
             elif common_causes is not None:
@@ -78,6 +85,7 @@ class CausalModel:
                     self._treatment,
                     self._outcome,
                     common_cause_names=self._common_causes,
+                    effect_modifier_names = self._effect_modifiers,
                     observed_node_names=self._data.columns.tolist()
                 )
             elif instruments is not None:
@@ -85,6 +93,7 @@ class CausalModel:
                     self._treatment,
                     self._outcome,
                     instrument_names=self._instruments,
+                    effect_modifier_names = self._effect_modifiers,
                     observed_node_names=self._data.columns.tolist()
                 )
             else:
@@ -98,11 +107,13 @@ class CausalModel:
                 self._treatment,
                 self._outcome,
                 graph,
-                observed_node_names=self._data.columns.tolist()
+                observed_node_names=self._data.columns.tolist(),
+                missing_nodes_as_confounders = self._missing_nodes_as_confounders
             )
             self._common_causes = self._graph.get_common_causes(self._treatment, self._outcome)
             self._instruments = self._graph.get_instruments(self._treatment,
                                                             self._outcome)
+            self._effect_modifiers = self._graph.get_effect_modifiers(self._treatment, self._outcome)
 
         self._other_variables = kwargs
         self.summary()
@@ -114,17 +125,22 @@ class CausalModel:
 
         """
         if proceed_when_unidentifiable is None:
-            proceed_unidentifiable = self._proceed_when_unidentifiable
+            proceed_when_unidentifiable = self._proceed_when_unidentifiable
 
         self.identifier = CausalIdentifier(self._graph,
                                            self._estimand_type,
-                                           proceed_when_unidentifiable=proceed_unidentifiable)
+                                           proceed_when_unidentifiable=proceed_when_unidentifiable)
         identified_estimand = self.identifier.identify_effect()
 
         return identified_estimand
 
     def estimate_effect(self, identified_estimand, method_name=None,
-                        test_significance=None, method_params=None):
+                        control_value = 0,
+                        treatment_value = 1,
+                        test_significance=None, evaluate_effect_strength=False,
+                        confidence_intervals=False,
+                        target_units="ate", effect_modifiers=None,
+                        method_params=None):
         """Estimate the identified causal effect.
 
         If method_name is provided, uses the provided method. Else, finds a
@@ -138,14 +154,24 @@ class CausalModel:
             and other method-dependent information
 
         """
+        if effect_modifiers is None:
+            effect_modifiers = self._effect_modifiers
+
         if method_name is None:
+            #TODO add propensity score as default backdoor method, iv as default iv method, add an informational message to show which method has been selected.
             pass
         else:
-            str_arr = method_name.split(".")
+            str_arr = method_name.split(".", maxsplit=1)
             identifier_name = str_arr[0]
             estimator_name = str_arr[1]
             identified_estimand.set_identifier_method(identifier_name)
-            causal_estimator_class = causal_estimators.get_class_object(estimator_name + "_estimator")
+            if estimator_name.startswith("econml"):
+                causal_estimator_class =causal_estimators.get_class_object("econml_cate_estimator")
+                if method_params is None:
+                    method_params = {}
+                method_params["_econml_methodname"] = estimator_name
+            else:
+                causal_estimator_class = causal_estimators.get_class_object(estimator_name + "_estimator")
 
         # Check if estimator's target estimand is identified
         if identified_estimand.estimands[identifier_name] is None:
@@ -155,14 +181,27 @@ class CausalModel:
             causal_estimator = causal_estimator_class(
                 self._data,
                 identified_estimand,
-                self._treatment, self._outcome,
+                self._treatment, self._outcome, #names of treatment and outcome
+                control_value = control_value,
+                treatment_value = treatment_value,
                 test_significance=test_significance,
+                evaluate_effect_strength=evaluate_effect_strength,
+                confidence_intervals = confidence_intervals,
+                target_units = target_units,
+                effect_modifiers = effect_modifiers,
                 params=method_params
             )
             estimate = causal_estimator.estimate_effect()
+            # Store parameters inside estimate object for refutation methods
             estimate.add_params(
                 estimand_type=identified_estimand.estimand_type,
-                estimator_class=causal_estimator_class
+                estimator_class=causal_estimator_class,
+                test_significance=test_significance,
+                evaluate_effect_strength=evaluate_effect_strength,
+                confidence_intervals=confidence_intervals,
+                target_units=target_units,
+                effect_modifiers=effect_modifiers,
+                method_params=method_params
             )
         return estimate
 
@@ -183,7 +222,8 @@ class CausalModel:
         if method_name is None:
             pass
         else:
-            str_arr = method_name.split(".")
+            str_arr = method_name.split(".", maxsplit=1)
+            print(str_arr)
             identifier_name = str_arr[0]
             estimator_name = str_arr[1]
             identified_estimand.set_identifier_method(identifier_name)

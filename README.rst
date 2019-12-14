@@ -57,7 +57,7 @@ Answering these questions requires causal reasoning. While many methods exist
 for causal inference, it is hard to compare their assumptions and robustness of results. DoWhy makes three contributions,
 
 1. Provides a principled way of modeling a given problem as a causal graph so
-   that all assumptions explicit.
+   that all assumptions are explicit.
 2. Provides a unified interface for many popular causal inference methods, combining the two major frameworks of graphical models and potential outcomes.
 3. Automatically tests for the validity of assumptions if possible and assesses
    the robustness of the estimate to violations.
@@ -119,8 +119,7 @@ pandas dataframe df that contains the data:
 
 .. code:: python
 
-    import dowhy
-    from dowhy.do_why import CausalModel
+    from dowhy import CausalModel
     import dowhy.datasets
 
     # Load some sample data
@@ -324,6 +323,21 @@ DoWhy supports the following refutation methods.
 * Placebo Treatment
 * Irrelevant Additional Confounder
 * Subset validation
+
+Citing this package
+-------------------
+If you find DoWhy useful for your research work, please cite us as follows:
+
+Amit Sharma, Emre Kiciman, et al. DoWhy: A Python package for causal inference. 2019. https://github.com/microsoft/dowhy
+
+Bibtex::
+
+  @misc{dowhy,
+  authors={Sharma, Amit and Kiciman, Emre and others},
+  title={Do{W}hy: {A Python package for causal inference}},
+  howpublished={https://github.com/microsoft/dowhy}
+  year={2019}
+  }
 
 
 Roadmap 
